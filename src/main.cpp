@@ -1,93 +1,144 @@
 #include <Arduino.h>
+#include "config/config.h"
+#include "network/net_manager.h"
 
-// --- Піни підключення ---
-#define PIN_TOUCH       1   // Товстий білий дріт від фольги
-#define PIN_LED_WHITE   4   // Білий дріт (перед R3 -> Q1)
-#define PIN_LED_YELLOW  5   // Синій дріт (перед R2 -> Q2)
-
-// --- Налаштування ШІМ ---
-#define PWM_FREQ        1000 
-#define PWM_RES         10   // 0..1023
-#define CH_WHITE        0
-#define CH_YELLOW       1
-
-// На скільки значення має вирости відносно спокою, щоб зарахувати дотик через пластик
-// Якщо спрацьовуватиме саме по собі — збільште (наприклад, до 2500)
-// Якщо погано відчуває крізь пластик — зменште (наприклад, до 1000)
-const uint32_t TOUCH_DELTA_ON  = 1800; 
-const uint32_t TOUCH_DELTA_OFF = 1000; 
-
-uint32_t touchBaseline = 0; // Базове значення у спокої (визначається при старті)
-int mode = 0; 
+uint32_t touchBaseline = 0;
 bool isTouched = false;
+bool isDimming = false;
 unsigned long touchStartTime = 0;
-unsigned long lastPrintTime = 0;
 
-void applyMode() {
-  switch (mode) {
-    case 0: ledcWrite(CH_WHITE, 0);   ledcWrite(CH_YELLOW, 0);   break;
-    case 1: ledcWrite(CH_WHITE, 0);   ledcWrite(CH_YELLOW, 800); break;
-    case 2: ledcWrite(CH_WHITE, 800); ledcWrite(CH_YELLOW, 0);   break;
-    case 3: ledcWrite(CH_WHITE, 512); ledcWrite(CH_YELLOW, 512); break;
-  }
-}
+// Спільний стан світла (синхронізований із Web UI)
+LampState lamp = { false, 1, BRIGHTNESS_DEFAULT };
+int8_t dimDirection = -1;
+
+float currentWhite = 0.0f;
+float currentYellow = 0.0f;
+unsigned long lastLoopTime = 0;
 
 void calibrateTouch() {
-  uint64_t sum = 0;
-  for (int i = 0; i < 30; i++) {
-    sum += touchRead(PIN_TOUCH);
-    delay(20);
-  }
-  touchBaseline = sum / 30;
-  Serial.printf("Калібрування завершено! Базовий рівень (Baseline): %u\n", touchBaseline);
+    uint64_t sum = 0;
+    for (int i = 0; i < TOUCH_CALIB_SAMPLES; i++) {
+        sum += touchRead(PIN_TOUCH);
+        delay(20);
+    }
+    touchBaseline = sum / TOUCH_CALIB_SAMPLES;
+    Serial.printf("[TOUCH] Baseline calibrated: %u\n", touchBaseline);
+}
+
+void handleTouch(float dt) {
+    uint32_t touchVal = 0;
+    for (int i = 0; i < TOUCH_FILTER_SAMPLES; i++) {
+        touchVal += touchRead(PIN_TOUCH);
+    }
+    touchVal /= TOUCH_FILTER_SAMPLES;
+
+    int32_t diff = (int32_t)touchVal - (int32_t)touchBaseline;
+    unsigned long now = millis();
+
+    if (!isTouched && diff > (int32_t)TOUCH_DELTA_ON) {
+        isTouched = true;
+        isDimming = false;
+        touchStartTime = now;
+    }
+
+    if (isTouched && (now - touchStartTime > TOUCH_LONG_PRESS_MS)) {
+        if (!isDimming) {
+            isDimming = true;
+            if (!lamp.isLampOn) {
+                lamp.isLampOn = true;
+                lamp.brightness = BRIGHTNESS_MIN;
+                dimDirection = 1;
+            }
+        }
+        lamp.brightness += dimDirection * DIM_SPEED_PER_SEC * dt;
+        if (lamp.brightness >= BRIGHTNESS_MAX) {
+            lamp.brightness = BRIGHTNESS_MAX;
+            dimDirection = -1;
+        } else if (lamp.brightness <= BRIGHTNESS_MIN) {
+            lamp.brightness = BRIGHTNESS_MIN;
+            dimDirection = 1;
+        }
+    }
+
+    if (isTouched && diff < (int32_t)TOUCH_DELTA_OFF) {
+        unsigned long duration = now - touchStartTime;
+        isTouched = false;
+
+        if (isDimming) {
+            dimDirection = -dimDirection;
+        } else if (duration >= TOUCH_DEBOUNCE_MS) {
+            if (!lamp.isLampOn) {
+                lamp.isLampOn = true;
+                lamp.colorMode = 1;
+            } else {
+                lamp.colorMode++;
+                if (lamp.colorMode > 3) {
+                    lamp.isLampOn = false;
+                    lamp.colorMode = 1;
+                }
+            }
+        }
+    }
+}
+
+void updateLightSmooth(float dt) {
+    float targetWhite = 0.0f;
+    float targetYellow = 0.0f;
+
+    if (lamp.isLampOn) {
+        float gammaBright = lamp.brightness * lamp.brightness;
+        switch (lamp.colorMode) {
+            case 1:
+                targetWhite = 0.0f;
+                targetYellow = gammaBright * PWM_MAX;
+                break;
+            case 2:
+                targetWhite = gammaBright * PWM_MAX;
+                targetYellow = 0.0f;
+                break;
+            case 3:
+                targetWhite  = gammaBright * (PWM_MAX * MIX_CHANNEL_LIMIT);
+                targetYellow = gammaBright * (PWM_MAX * MIX_CHANNEL_LIMIT);
+                break;
+        }
+    }
+
+    float fadeSpeed = isDimming ? FADE_SPEED_DIMMING : FADE_SPEED_SWITCH;
+    float step = min(1.0f, fadeSpeed * dt);
+
+    currentWhite  += (targetWhite  - currentWhite)  * step;
+    currentYellow += (targetYellow - currentYellow) * step;
+
+    ledcWrite(CH_WHITE,  (currentWhite  < 1.5f) ? 0 : (uint16_t)roundf(currentWhite));
+    ledcWrite(CH_YELLOW, (currentYellow < 1.5f) ? 0 : (uint16_t)roundf(currentYellow));
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(1500);
+    Serial.begin(115200);
+    delay(1000);
 
-  // Збільшуємо час вимірювання (measure) для підвищення чутливості крізь пластик
-  touchSetCycles(0x2000, 0x1000); 
+    touchSetCycles(TOUCH_MEAS_CYCLES, TOUCH_SLEEP_CYCLES);
 
-  ledcSetup(CH_WHITE, PWM_FREQ, PWM_RES);
-  ledcSetup(CH_YELLOW, PWM_FREQ, PWM_RES);
-  ledcAttachPin(PIN_LED_WHITE, CH_WHITE);
-  ledcAttachPin(PIN_LED_YELLOW, CH_YELLOW);
+    ledcSetup(CH_WHITE, PWM_FREQ, PWM_RES);
+    ledcSetup(CH_YELLOW, PWM_FREQ, PWM_RES);
+    ledcAttachPin(PIN_LED_WHITE, CH_WHITE);
+    ledcAttachPin(PIN_LED_YELLOW, CH_YELLOW);
+    ledcWrite(CH_WHITE, 0);
+    ledcWrite(CH_YELLOW, 0);
 
-  applyMode();
-  calibrateTouch(); // Вимірюємо фон у спокої
+    calibrateTouch();
+    netManager.begin(&lamp);
+
+    lastLoopTime = millis();
 }
 
 void loop() {
-  // Беремо середнє з 4 швидких замірів, щоб прибрати електричні шуми
-  uint32_t touchVal = 0;
-  for (int i = 0; i < 4; i++) {
-    touchVal += touchRead(PIN_TOUCH);
-  }
-  touchVal /= 4;
+    netManager.loop();
 
-  int32_t diff = (int32_t)touchVal - (int32_t)touchBaseline;
+    unsigned long now = millis();
+    float dt = (now - lastLoopTime) / 1000.0f;
+    lastLoopTime = now;
 
-  // Фіксуємо натискання (коли приріст перевищив TOUCH_DELTA_ON)
-  if (!isTouched && diff > (int32_t)TOUCH_DELTA_ON) {
-    delay(15);
-    isTouched = true;
-    touchStartTime = millis();
-    
-    mode = (mode + 1) % 4;
-    Serial.printf(">>> ДОТИК! Значення: %u (приріст +%d) -> Режим: %d\n", touchVal, diff, mode);
-    applyMode();
-  }
-
-  // Фіксуємо відпускання
-  if (isTouched && diff < (int32_t)TOUCH_DELTA_OFF) {
-    isTouched = false;
-    Serial.printf("<<< Відпущено (утримання: %lu мс)\n", millis() - touchStartTime);
-  }
-
-  // Вивід статистики в Serial для точного підбору TOUCH_DELTA_ON
-  if (!isTouched && (millis() - lastPrintTime > 1000)) {
-    lastPrintTime = millis();
-    Serial.printf("Спокій: %u | База: %u | Різниця: %+d\n", touchVal, touchBaseline, diff);
-  }
+    handleTouch(dt);
+    updateLightSmooth(dt);
 }
