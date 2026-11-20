@@ -32,14 +32,14 @@
 #define FADE_SPEED_DIMMING  25.0f   // Fast tracking during manual touch dimming
 
 // --- CAPACITIVE TOUCH CALIBRATION & TIMINGS ---
-#define TOUCH_MEAS_CYCLES   0x2000  // Extended measure cycles for plastic enclosure penetration
+#define TOUCH_MEAS_CYCLES   0x0800  // Зменшений цикл вимірювання (тільки контактний дотик)
 #define TOUCH_SLEEP_CYCLES  0x1000
-#define TOUCH_CALIB_SAMPLES 30      // Boot-time baseline averaging samples
-#define TOUCH_FILTER_SAMPLES 4      // Runtime moving average samples
-#define TOUCH_DELTA_ON      1800    // Schmitt trigger upper threshold
-#define TOUCH_DELTA_OFF     1000    // Schmitt trigger lower release threshold
-#define TOUCH_DEBOUNCE_MS   30      // Minimum valid tap duration
-#define TOUCH_LONG_PRESS_MS 450     // Hold threshold to enter smooth dimming
+#define TOUCH_CALIB_SAMPLES 30
+#define TOUCH_FILTER_SAMPLES 4
+#define TOUCH_DELTA_ON      3500    // Поріг спрацьовування для циклу 0x0800
+#define TOUCH_DELTA_OFF     2000    // Поріг відпускання
+#define TOUCH_DEBOUNCE_MS   45
+#define TOUCH_LONG_PRESS_MS 450
 
 // --- NETWORK, WEB UI & OTA DEFAULTS ---
 #define WIFI_MAX_SLOTS      6       // Multi-AP roaming slots in NVS
@@ -49,5 +49,9 @@
 #define DEFAULT_HOSTNAME    "ridy-lamp"
 #define DEFAULT_ADMIN_USER  "admin"
 #define DEFAULT_ADMIN_PASS  "admin"
-
+// --- NVS STATE PERSISTENCE (WEAR LEVELING PROTECTION) ---
+#define NVS_SAVE_DELAY_MS   3000    // Write state to Flash 3s after last user interaction
+// --- SYSTEM RING-BUFFER LOGGER ---
+#define SYSLOG_MAX_ENTRIES  12      // Fixed ring buffer size (zero heap fragmentation)
+#define SYSLOG_LINE_LEN     84      // Max characters per log entry
 #endif // CONFIG_H

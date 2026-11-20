@@ -5,6 +5,7 @@ struct LampState {
     bool isLampOn;
     uint8_t colorMode;
     float brightness;
+    int32_t touchDelta;
 };
 
 class NetManager {
