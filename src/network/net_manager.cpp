@@ -48,6 +48,7 @@ void NetManager::begin(LampState *statePtr)
 
     connectMultiAP();
     setupOTA();
+    MDNS.addService("http", "tcp", 80);
     setupWebServer();
 }
 
@@ -230,6 +231,31 @@ void NetManager::setupWebServer()
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out); });
+
+    // Fast lightweight telemetry & presence-trigger endpoint for ESP32S3DevRound station
+    server.on("/api/link", HTTP_ANY, [this](AsyncWebServerRequest* req) {
+        if (!req->hasHeader("X-Link-Key") || req->getHeader("X-Link-Key")->value() != LINK_API_KEY) {
+            return req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+        }
+
+        if (req->method() == HTTP_POST && req->hasParam("presence")) {
+            bool present = (req->getParam("presence")->value() == "1");
+            if (!present && _lampState->isLampOn) {
+                _lampState->isLampOn = false;
+                LOG_I("Station Radar -> User away, fading OFF");
+            } else if (present && !_lampState->isLampOn) {
+                _lampState->isLampOn = true;
+                LOG_I("Station Radar -> User detected, fading ON");
+            }
+        }
+
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"on\":%s,\"mode\":%u,\"bri\":%d}",
+                 _lampState->isLampOn ? "true" : "false",
+                 _lampState->colorMode,
+                 (int)roundf(_lampState->brightness * 100.0f));
+        req->send(200, "application/json", resp);
+    });
 
     // Persist Wi-Fi slots, hostname, and Web/OTA password to NVS
     server.on("/api/save", HTTP_POST, [](AsyncWebServerRequest *req) {}, nullptr, [this](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total)

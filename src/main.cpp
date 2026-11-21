@@ -14,7 +14,7 @@ void setup() {
     // Initialize PWM driver, restore NVS state, and calibrate touch sensor before Wi-Fi radio startup
     lampController.begin();
 
-    // Start Multi-AP Wi-Fi roaming, embedded Web UI, and ArduinoOTA service
+    // Start Multi-AP Wi-Fi roaming, embedded Web UI, Link API, and ArduinoOTA service
     netManager.begin(lampController.getState());
 
     lastLoopTime = millis();

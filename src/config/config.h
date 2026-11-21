@@ -54,4 +54,13 @@
 // --- SYSTEM RING-BUFFER LOGGER ---
 #define SYSLOG_MAX_ENTRIES  12      // Fixed ring buffer size (zero heap fragmentation)
 #define SYSLOG_LINE_LEN     84      // Max characters per log entry
+// --- ROUND TFT DISPLAY (1.28" 240x240 GC9A01, 7-PIN SPI) ---
+// #define TFT_WIDTH           240
+// #define TFT_HEIGHT          240
+// #define TFT_SCLK_PIN        12      // Blue/Black (SCL)
+// #define TFT_MOSI_PIN        11      // Blue (SDA)
+// #define TFT_CS_PIN          10      // Yellow (CS)
+// #define TFT_DC_PIN          13      // Green (DC)
+// #define TFT_RST_PIN         14      // White (RST)
+#define LINK_API_KEY        "ridy-desk-2026"
 #endif // CONFIG_H
