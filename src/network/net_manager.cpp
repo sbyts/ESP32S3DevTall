@@ -204,7 +204,10 @@ void NetManager::setupWebServer()
             }
             JsonDocument doc;
             if (!deserializeJson(doc, data, len)) {
-                if (doc["on"].is<bool>())  _lampState->isLampOn   = doc["on"];
+                if (doc["on"].is<bool>()) {
+                    _lampState->isLampOn = doc["on"];
+                    _autoOffDeadlineMs = 0; // Cancel pending station auto-off on manual control
+                }
                 if (doc["mode"].is<int>()) _lampState->colorMode  = constrain((int)doc["mode"], 1, 3);
                 if (doc["bri"].is<int>())  _lampState->brightness = constrain((int)doc["bri"], 10, 100) / 100.0f;
                 LOG_I("Web UI -> %s | Mode %u | %d%%",
@@ -232,30 +235,69 @@ void NetManager::setupWebServer()
         serializeJson(doc, out);
         req->send(200, "application/json", out); });
 
-    // Fast lightweight telemetry & presence-trigger endpoint for ESP32S3DevRound station
-    server.on("/api/link", HTTP_ANY, [this](AsyncWebServerRequest* req) {
+    // Fast lightweight telemetry & delayed presence-trigger endpoint for ESP32S3DevRound station
+    server.on("/api/link", HTTP_ANY, [this](AsyncWebServerRequest *req)
+              {
         if (!req->hasHeader("X-Link-Key") || req->getHeader("X-Link-Key")->value() != LINK_API_KEY) {
             return req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
         }
 
-        if (req->method() == HTTP_POST && req->hasParam("presence")) {
-            bool present = (req->getParam("presence")->value() == "1");
-            if (!present && _lampState->isLampOn) {
-                _lampState->isLampOn = false;
-                LOG_I("Station Radar -> User away, fading OFF");
-            } else if (present && !_lampState->isLampOn) {
-                _lampState->isLampOn = true;
-                LOG_I("Station Radar -> User detected, fading ON");
+        if (req->method() == HTTP_POST) {
+            // Second arg 'false' reads query string params (?presence=0&delay=10) on POST
+            if (req->hasParam("presence", false)) {
+                bool present = (req->getParam("presence", false)->value() == "1");
+
+                if (present) {
+                    // Cancel any pending off-timer immediately
+                    _autoOffDeadlineMs = 0;
+
+                    if (!_lampState->isLampOn) {
+                        _lampState->isLampOn = true; // Restores saved colorMode & brightness
+                        LOG_I("Station Radar -> Presence ON (M%u, %d%%)",
+                              _lampState->colorMode,
+                              (int)roundf(_lampState->brightness * 100.0f));
+                    }
+                } else {
+                    // User left: read optional 'delay' in seconds (default 10s)
+                    uint32_t delaySec = 10;
+                    if (req->hasParam("delay", false)) {
+                        delaySec = constrain((uint32_t)req->getParam("delay", false)->value().toInt(), 0U, 3600U);
+                    }
+
+                    if (_lampState->isLampOn) {
+                        if (delaySec == 0) {
+                            _autoOffDeadlineMs = 0;
+                            _lampState->isLampOn = false;
+                            LOG_I("Station Radar -> Away, immediate OFF");
+                        } else {
+                            _autoOffDeadlineMs = millis() + (delaySec * 1000UL);
+                            LOG_I("Station Radar -> Away, OFF in %us", delaySec);
+                        }
+                    } else {
+                        _autoOffDeadlineMs = 0;
+                    }
+                }
+            } else {
+                LOG_W("Station POST /api/link missing 'presence' param");
             }
         }
 
-        char resp[64];
-        snprintf(resp, sizeof(resp), "{\"on\":%s,\"mode\":%u,\"bri\":%d}",
+        // Calculate remaining countdown seconds for station UI sync
+        uint32_t offInSec = 0;
+        if (_autoOffDeadlineMs > 0 && _lampState->isLampOn) {
+            long rem = (long)(_autoOffDeadlineMs - millis());
+            if (rem > 0) {
+                offInSec = (uint32_t)((rem + 999L) / 1000L);
+            }
+        }
+
+        char resp[96];
+        snprintf(resp, sizeof(resp), "{\"on\":%s,\"mode\":%u,\"bri\":%d,\"off_in\":%u}",
                  _lampState->isLampOn ? "true" : "false",
                  _lampState->colorMode,
-                 (int)roundf(_lampState->brightness * 100.0f));
-        req->send(200, "application/json", resp);
-    });
+                 (int)roundf(_lampState->brightness * 100.0f),
+                 offInSec);
+        req->send(200, "application/json", resp); });
 
     // Persist Wi-Fi slots, hostname, and Web/OTA password to NVS
     server.on("/api/save", HTTP_POST, [](AsyncWebServerRequest *req) {}, nullptr, [this](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total)
@@ -296,6 +338,22 @@ void NetManager::loop()
 {
     ArduinoOTA.handle();
 
+    // Check delayed auto-off timer triggered by station radar
+    if (_autoOffDeadlineMs > 0)
+    {
+        if (!_lampState->isLampOn)
+        {
+            // Lamp was already turned off manually (e.g. touch button) -> cancel timer
+            _autoOffDeadlineMs = 0;
+        }
+        else if ((long)(millis() - _autoOffDeadlineMs) >= 0)
+        {
+            _autoOffDeadlineMs = 0;
+            _lampState->isLampOn = false; // Keeps colorMode & brightness intact
+            LOG_I("Station Radar -> Auto-off timer expired, fading OFF");
+        }
+    }
+
     // Non-blocking Wi-Fi reconnect watchdog in STA mode
     if (!_apMode && (millis() - lastWifiCheckMs >= WIFI_WATCHDOG_INTERVAL_MS))
     {
@@ -307,6 +365,7 @@ void NetManager::loop()
         }
     }
 }
+
 bool NetManager::isConnected() const
 {
     return !_apMode && (WiFi.status() == WL_CONNECTED);

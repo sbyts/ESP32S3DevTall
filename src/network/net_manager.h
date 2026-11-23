@@ -21,7 +21,8 @@ private:
     String _adminUser = "admin";
     String _adminPass = "admin";
     String _hostname  = "ridy-lamp";
-
+    unsigned long _autoOffDeadlineMs = 0; // 0 = timer inactive
+    
     void connectMultiAP();
     void startFallbackAP();
     void setupWebServer();
